@@ -1,4 +1,4 @@
-// * Cache Google Maps results for 5 minutes
+// * Origin to Location
 // * Accept departure time
 // * Mention if route includes ferries, how many? (98110)
 // * Allow changing user's default origin
@@ -7,8 +7,12 @@
 'use strict';
 
 const Alexa = require('alexa-sdk');
+const AWS = require('aws-sdk');
+AWS.config.update({region: 'us-east-1'});
 const https = require('https');
 const querystring = require('querystring');
+
+const cloudwatch = new AWS.CloudWatch({apiVersion: '2010-08-01'});
 const APP_ID = 'amzn1.ask.skill.77f9ca28-bcb2-453c-9795-69039d37c8fe';
 
 const ALEXA_ENDPOINT = 'api.amazonalexa.com';
@@ -29,9 +33,9 @@ const samplePhrases = [
 const digits = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
 
 const welcomeMessage = 'Welcome to "How Far" Alexa skill <break time="0.05s"/> telling how far is your destination in driving hours. ' + 
-                      'You can say <break time="0.25s"/> "' + samplePhrases[0] + 
-                      '", <break time="0.4s"/> "nine eight zero zero six" <break time="0.3s"/> ' + 
-                      'Or <break time="0.3s"/> "' + samplePhrases[2] + '".';  
+                       'You can say <break time="0.25s"/> "' + samplePhrases[0] + 
+                       '", <break time="0.4s"/> "nine eight zero zero six" <break time="0.3s"/> ' + 
+                       'Or <break time="0.3s"/> "' + samplePhrases[2] + '".';  
                       
 const welcomeSpeechOutput = welcomeMessage + waitingForInputDelayed;
                       
@@ -108,21 +112,33 @@ function httpGet(hostname, path, args, headers, callback) {
         method: 'GET'
     };
     
-    log('Sending request to [https://' + options.hostname + options.path + ']');
-    console.time(timerName);
-
+    log('https://' + options.hostname + options.path);
+    
+    const startTime = process.hrtime();
     const request = https.request(options, (response) => {
         log(hostname + ' - Response Code: ' + response.statusCode);
         let body = '';
         response.on('data', (data) => { body += data; });
         response.on('end', () => {
-            console.timeEnd(timerName); 
+            
+            const responseTime = process.hrtime(startTime);
+            const responseTimeInMillis = ((responseTime[0] + (responseTime[1] / 1e9)) * 1000).toFixed(2);
+            
+            log(hostname + ' - Response Time: ' + responseTimeInMillis + ' milliseconds');
+            
+            var params = {
+              MetricData: [{ MetricName: 'HTTP-ResponseTime', Dimensions: [{ Name: 'Hostname', Value: hostname }], Unit: 'Milliseconds', Value: responseTimeInMillis }],
+              Namespace: 'HowFarLambda'
+            };
+            
+            cloudwatch.putMetricData(params, (error) => { if (error) console.error(error); });
+            
             callback(JSON.parse(body));
         });
     });
     
     if (request) {
-        request.on('error', (e) => { console.error(e); callback(); });
+        request.on('error', (error) => { console.error(error); callback(); });
         request.end();
     } else {
         console.error('Failed to create an HTTPS request');
@@ -210,8 +226,10 @@ function howFar(location, origin, callback){
             let response = ''
             if (hasData(result.routes) && hasData(result.routes[0].legs)){
                 let leg = result.routes[0].legs[0];
-                let duration = (leg.duration.text || 'NoDuration').replace(/ 0 mins/, '');  // 4 hours 0 mins => 4 hours (Vegas from 92708)
-                let distance = (leg.distance.text || 'NoDistance').replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
+                let duration = (leg.duration.text || 'NoDuration').
+                               replace(/ 0 mins/, '').replace(/ 0 hours/, '');  // (Vegas from 92708, Miami beach from Seattle, WA)
+                let distance = (leg.distance.text || 'NoDistance').
+                               replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
                 let drivingDays = getDrivingDays(duration);
                 log("[" + origin + "] => [" + location + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]");
                 response = '<say-as interpret-as="address">' + location + '</say-as> is ' + duration + ' away (or ' + distance + ') from <say-as interpret-as="address">' + origin + '</say-as>.' + 
