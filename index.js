@@ -1,8 +1,6 @@
-// * Origin to Location
 // * Accept departure time
-// * Mention if route includes ferries, how many? (98110)
-// * Allow changing user's default origin
-// * Test with https://www.parentmap.com/calendar
+// * Mention if route includes ferries, how many? (98006 => 98110)
+// * Allow updating user's default origin (DynamoDB)
 
 'use strict';
 
@@ -100,16 +98,19 @@ function tellWelcomeMessage(self) {
 }
 
 // HTTP GET wrapper
-function httpGet(hostname, path, args, headers, callback) {
+function httpGet(hostname, timeoutInMillis, path, args, headers, callback) {
 
     const timerName = hostname + ' - Response Time';
     headers['Accept'] = 'application/json';
 
+    // https://nodejs.org/api/https.html#https_https_request_options_callback
+    // https://nodejs.org/api/http.html#http_http_request_options_callback
     const options = {
         hostname: hostname,
         path: path + '?' + querystring.stringify(args),
         headers: headers,
-        method: 'GET'
+        method: 'GET',
+        timeout: timeoutInMillis
     };
     
     log('https://' + options.hostname + options.path);
@@ -138,6 +139,7 @@ function httpGet(hostname, path, args, headers, callback) {
     });
     
     if (request) {
+        request.setTimeout(timeoutInMillis - 100, () => { console.error( "[" + hostname + "] request has timed out after " + timeoutInMillis + " milliseconds" ); callback(); });
         request.on('error', (error) => { console.error(error); callback(); });
         request.end();
     } else {
@@ -165,7 +167,7 @@ function setDefaultOrigin(self, callbackWhenDone){
         let deviceId = getDeviceId(self);
         let path = '/v1/devices/' + deviceId + '/settings/address/countryAndPostalCode';
         
-        httpGet(ALEXA_ENDPOINT, path, {}, { Authorization: 'Bearer ' + consentToken }, 
+        httpGet(ALEXA_ENDPOINT, 1000, path, {}, { Authorization: 'Bearer ' + consentToken }, 
                 (result) => {
                     log(result);
                     if (result && result.postalCode && result.postalCode.match(/^[0-9]+$/)) {
@@ -215,7 +217,7 @@ function getDrivingDays(duration) {
 function howFar(location, origin, callback){
     log("Getting driving directions from [" + origin + "] to [" + location + "]");
     
-    httpGet(MAPS_ENDPOINT, '/maps/api/directions/json', { 
+    httpGet(MAPS_ENDPOINT, 2500, '/maps/api/directions/json', { 
         origin: origin,
         destination: location,
         mode: 'driving',
@@ -231,8 +233,11 @@ function howFar(location, origin, callback){
                 let distance = (leg.distance.text || 'NoDistance').
                                replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
                 let drivingDays = getDrivingDays(duration);
-                log("[" + origin + "] => [" + location + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]");
-                response = '<say-as interpret-as="address">' + location + '</say-as> is ' + duration + ' away (or ' + distance + ') from <say-as interpret-as="address">' + origin + '</say-as>.' + 
+                let fierries = (leg.steps || []).filter(step => step.maneuver && (step.maneuver.toLowerCase() === 'ferry')).length;  
+                log("[" + origin + "] => [" + location + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]/[" + fierries + " ferries]");
+                response = '<say-as interpret-as="address">' + location + '</say-as> is ' + duration + 
+                           (fierries < 1 ? '' : ' and ' + fierries + ' ' + (fierries == 1 ? 'ferry' : 'ferries')) + 
+                           ' away (or ' + distance + ') from <say-as interpret-as="address">' + origin + '</say-as>.' + 
                            (drivingDays > 1 ? ' <break time="0.03s"/>That\'ll be about ' + drivingDays + ' days driving.' : 
                                             '');
             } else {
