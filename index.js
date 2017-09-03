@@ -1,6 +1,6 @@
 // * Accept departure time
-// * Mention if route includes ferries, how many? (98006 => 98110)
-// * Allow updating user's default origin (DynamoDB)
+// * Allow updating user's default origin
+// * Alert on errors
 
 'use strict';
 
@@ -28,12 +28,10 @@ const samplePhrases = [
     'How far is Vegas from LAX ?'
 ]
 
-const digits = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
-
-const welcomeMessage = 'Welcome to "How Far" Alexa skill <break time="0.05s"/> telling how far is your destination in driving hours. ' + 
-                       'You can say <break time="0.25s"/> "' + samplePhrases[0] + 
-                       '", <break time="0.4s"/> "nine eight zero zero six" <break time="0.3s"/> ' + 
-                       'Or <break time="0.3s"/> "' + samplePhrases[2] + '".';  
+const welcomeMessage = 'Welcome to "How Far" Alexa skill <break time="0.05s"/> telling how far your destination is in driving hours. ' + 
+                       'You can say <break time="0.25s"/> <say-as interpret-as="address"> ' + samplePhrases[0] + ' </say-as>, ' +  
+                       '<break time="0.4s"/> <say-as interpret-as="address"> ' + samplePhrases[1] + ' </say-as><break time="0.3s"/> ' + 
+                       'Or <break time="0.3s"/> ' + samplePhrases[2] + '.';  
                       
 const welcomeSpeechOutput = welcomeMessage + waitingForInputDelayed;
                       
@@ -86,29 +84,21 @@ function askWithCard(self, speechOutput, repromptSpeech, cardTitle, cardContent)
 }
 
 function tellWelcomeMessage(self) {
-    let defaultOrigin = getDefaultOrigin(self);
-    
-    if (defaultOrigin.match(/^\d+$/)) {
-        // 123 => "one two three"
-        defaultOrigin = defaultOrigin.split('').map(digit => digits[parseInt(digit)]).join(' ');
-    }
-    
-    let speechOutput = welcomeMessage + " <break time='0.3s'/> Your location is set to " + defaultOrigin + ". " + waitingForInputDelayed; 
+    let speechOutput = welcomeMessage + 
+                       " <break time='0.3s'/> Your location is set to <say-as interpret-as='address'>" + getDefaultOrigin(self) + "</say-as>. " + 
+                       waitingForInputDelayed; 
     askWithCard(self, speechOutput, waitingForInput, waitingForInput, welcomeCardContent);
 }
 
 // HTTP GET wrapper
 function httpGet(hostname, timeoutInMillis, path, args, headers, callback) {
 
-    const timerName = hostname + ' - Response Time';
-    headers['Accept'] = 'application/json';
-
     // https://nodejs.org/api/https.html#https_https_request_options_callback
     // https://nodejs.org/api/http.html#http_http_request_options_callback
     const options = {
         hostname: hostname,
         path: path + '?' + querystring.stringify(args),
-        headers: headers,
+        headers: Object.assign({}, headers, {'Accept' : 'application/json'}),
         method: 'GET',
         timeout: timeoutInMillis
     };
@@ -123,7 +113,7 @@ function httpGet(hostname, timeoutInMillis, path, args, headers, callback) {
         response.on('end', () => {
             
             const responseTime = process.hrtime(startTime);
-            const responseTimeInMillis = ((responseTime[0] + (responseTime[1] / 1e9)) * 1000).toFixed(2);
+            const responseTimeInMillis = parseFloat(((responseTime[0] + (responseTime[1] / 1e9)) * 1000).toFixed(2));
             
             log(hostname + ' - Response Time: ' + responseTimeInMillis + ' milliseconds');
             
@@ -139,7 +129,7 @@ function httpGet(hostname, timeoutInMillis, path, args, headers, callback) {
     });
     
     if (request) {
-        request.setTimeout(timeoutInMillis - 100, () => { console.error( "[" + hostname + "] request has timed out after " + timeoutInMillis + " milliseconds" ); callback(); });
+        request.setTimeout(timeoutInMillis - 100, () => { console.error( "!!! [" + hostname + "] request has timed out after " + timeoutInMillis + " milliseconds" ); callback(); });
         request.on('error', (error) => { console.error(error); callback(); });
         request.end();
     } else {
@@ -167,7 +157,7 @@ function setDefaultOrigin(self, callbackWhenDone){
         let deviceId = getDeviceId(self);
         let path = '/v1/devices/' + deviceId + '/settings/address/countryAndPostalCode';
         
-        httpGet(ALEXA_ENDPOINT, 1000, path, {}, { Authorization: 'Bearer ' + consentToken }, 
+        httpGet(ALEXA_ENDPOINT, 2000, path, {}, { Authorization: 'Bearer ' + consentToken }, 
                 (result) => {
                     log(result);
                     if (result && result.postalCode && result.postalCode.match(/^[0-9]+$/)) {
@@ -233,16 +223,17 @@ function howFar(location, origin, callback){
                 let distance = (leg.distance.text || 'NoDistance').
                                replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
                 let drivingDays = getDrivingDays(duration);
-                let fierries = (leg.steps || []).filter(step => step.maneuver && (step.maneuver.toLowerCase() === 'ferry')).length;  
-                log("[" + origin + "] => [" + location + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]/[" + fierries + " ferries]");
+                let ferries = (leg.steps || []).filter(step => 'ferry' === step.maneuver).length;  
+                log("[" + origin + "] => [" + location + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]/[" + ferries + " ferries]");
                 response = '<say-as interpret-as="address">' + location + '</say-as> is ' + duration + 
-                           (fierries < 1 ? '' : ' and ' + fierries + ' ' + (fierries == 1 ? 'ferry' : 'ferries')) + 
+                           (ferries < 1 ? '' : ' and ' + ferries + ' ' + (ferries == 1 ? 'ferry' : 'ferries')) + 
                            ' away (or ' + distance + ') from <say-as interpret-as="address">' + origin + '</say-as>.' + 
                            (drivingDays > 1 ? ' <break time="0.03s"/>That\'ll be about ' + drivingDays + ' days driving.' : 
-                                            '');
+                                              '');
             } else {
-                log("[" + origin + "] => [" + location + "]: no route available");
-                response = noRouteResponse() + ' to <say-as interpret-as="address">' + location + '</say-as> from <say-as interpret-as="address">' + origin + '</say-as>.';
+                log("[" + origin + "] => [" + location + "]: no route found");
+                response = noRouteResponse() +
+                           ' to <say-as interpret-as="address">' + location + '</say-as> from <say-as interpret-as="address">' + origin + '</say-as>.';
             }
             
             callback(response + '\n\n' + waitingForInputDelayed);
@@ -288,11 +279,10 @@ const handlers = {
 
 
 exports.handler = (event, context) => {
-    log('------- [' + event.request.type + '][' + (event.request.intent ? event.request.intent.name : '') + '] ---------------------------------------------------------------------');
+    let isTestRequest = ! (event.context && event.context.System && event.context.System.user && event.context.System.user.userId);
+    log('------- [' + event.request.type + '][' + (event.request.intent ? event.request.intent.name : '') + ']' + (isTestRequest ? '[TEST]' : '') + ' ---------------------------------------------------------------------');
     var alexa = Alexa.handler(event, context);
     alexa.APP_ID = APP_ID;
-    // To enable string internationalization (i18n) features, set a resources object.
-    //alexa.resources = languageStrings;
     alexa.registerHandlers(handlers);
     alexa.execute();
 };
