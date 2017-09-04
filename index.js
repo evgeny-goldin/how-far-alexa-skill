@@ -1,6 +1,7 @@
+// * Emit errors metric
 // * Accept departure time
-// * Mention if route includes ferries, how many? (98006 => 98110)
-// * Allow updating user's default origin (DynamoDB)
+// * Allow updating user's default origin
+
 
 'use strict';
 
@@ -15,12 +16,17 @@ const APP_ID = 'amzn1.ask.skill.77f9ca28-bcb2-453c-9795-69039d37c8fe';
 
 const ALEXA_ENDPOINT = 'api.amazonalexa.com';
 const MAPS_ENDPOINT = 'maps.googleapis.com';
+const ALEXA_ENDPOINT_TIMEOUT = 2000;
+const MAPS_ENDPOINT_TIMEOUT = 4000;
+const ALEXA_ENDPOINT_RETRIES = 3;
+const MAPS_ENDPOINT_RETRIES = 3;
 
 const waitingForInput = 'Where would you like to go?';
 const waitingForInputDelayed = ' <break time="0.5s"/> ' + waitingForInput;
 const drivingHoursPerDay = 8;
 const defaultLocation = 'Seattle, WA';
 const defaultOrigin = 'Seattle, WA';
+const CloudWatchNamespace = 'HowFarLambda';
 
 const samplePhrases = [
     'Mexico City', 
@@ -28,12 +34,10 @@ const samplePhrases = [
     'How far is Vegas from LAX ?'
 ]
 
-const digits = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
-
-const welcomeMessage = 'Welcome to "How Far" Alexa skill <break time="0.05s"/> telling how far is your destination in driving hours. ' + 
-                       'You can say <break time="0.25s"/> "' + samplePhrases[0] + 
-                       '", <break time="0.4s"/> "nine eight zero zero six" <break time="0.3s"/> ' + 
-                       'Or <break time="0.3s"/> "' + samplePhrases[2] + '".';  
+const welcomeMessage = 'Welcome to "How Far" Alexa skill <break time="0.05s"/> telling how far your destination is in driving hours. ' + 
+                       'You can say <break time="0.25s"/> <say-as interpret-as="address"> ' + samplePhrases[0] + ' </say-as>, ' +  
+                       '<break time="0.4s"/> <say-as interpret-as="address"> ' + samplePhrases[1] + ' </say-as><break time="0.3s"/> ' + 
+                       'Or <break time="0.3s"/> ' + samplePhrases[2] + '.';  
                       
 const welcomeSpeechOutput = welcomeMessage + waitingForInputDelayed;
                       
@@ -49,8 +53,12 @@ function logEvent(self) {
     log("Device: " + getDeviceId(self));
 }
 
+function randomNumber(topNumber) {
+    return Math.floor(Math.random() * topNumber);
+}
+
 function random(array) {
-    return(array[Math.floor(Math.random() * array.length)]);
+    return(array[ randomNumber(array.length) ]);
 }
 
 function complyResponse() {
@@ -86,65 +94,103 @@ function askWithCard(self, speechOutput, repromptSpeech, cardTitle, cardContent)
 }
 
 function tellWelcomeMessage(self) {
-    let defaultOrigin = getDefaultOrigin(self);
-    
-    if (defaultOrigin.match(/^\d+$/)) {
-        // 123 => "one two three"
-        defaultOrigin = defaultOrigin.split('').map(digit => digits[parseInt(digit)]).join(' ');
-    }
-    
-    let speechOutput = welcomeMessage + " <break time='0.3s'/> Your location is set to " + defaultOrigin + ". " + waitingForInputDelayed; 
+    let speechOutput = welcomeMessage + 
+                       " <break time='0.3s'/> Your location is set to <say-as interpret-as='address'>" + getDefaultOrigin(self) + "</say-as>. " + 
+                       waitingForInputDelayed; 
     askWithCard(self, speechOutput, waitingForInput, waitingForInput, welcomeCardContent);
 }
 
-// HTTP GET wrapper
-function httpGet(hostname, timeoutInMillis, path, args, headers, callback) {
+function handleError(error, errorDescription, errorType) {
+    console.error('++++++++++ [' + errorDescription + '] ++++++++++'); 
+    console.error(error || errorDescription); 
+    console.error('++++++++++ [' + errorDescription + '] ++++++++++'); 
+    emitCloudWatchMetric('LoggedError', 'Count', 1, 'ErrorType', errorType, errorType != 'EmitCloudWatchMetric');
+}
 
-    const timerName = hostname + ' - Response Time';
-    headers['Accept'] = 'application/json';
+function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue, emitMetricIfFailed = true) {
+    // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/CloudWatch.html#putMetricData-property
+    log("Emitting CloudWatch " + CloudWatchNamespace + " metric [" + name + "] = [" + value + "] (" + unit + ", " + dimensionName + " = " + dimensionValue + ")")
+    let params = { 
+        Namespace: CloudWatchNamespace, 
+        MetricData: [{ 
+           MetricName: name, 
+           Dimensions: [{ Name: dimensionName, Value: dimensionValue }],
+           Unit: unit, 
+           Value: parseFloat(value)
+        }]
+    };
+    
+    cloudwatch.putMetricData(params, (error) => { 
+        if (error) {
+            handleError(error, 'Failed emittting CloudWatch metric', 'EmitCloudWatchMetric');
+        }
+    });
+}
+
+// HTTP GET wrapper
+function httpsGet(hostname, timeoutInMillis, retries, path, args, headers, callback) {
 
     // https://nodejs.org/api/https.html#https_https_request_options_callback
     // https://nodejs.org/api/http.html#http_http_request_options_callback
     const options = {
         hostname: hostname,
         path: path + '?' + querystring.stringify(args),
-        headers: headers,
-        method: 'GET',
-        timeout: timeoutInMillis
+        headers: Object.assign({}, headers, {'Accept' : 'application/json'}),
+        method: 'GET'
     };
     
-    log('https://' + options.hostname + options.path);
+    log(' ==> [https://' + options.hostname + options.path + '], timeout is ' + timeoutInMillis + ' ms, ' + retries + ' retries');
     
     const startTime = process.hrtime();
+    const errorType = 'HttpsGet-' + hostname;
+    let statusCode  = -1;
+    let timedOut = false;
+    
+    const handleHttpsError = (request, error, errorDescription) => {
+        if (request) { request.abort(); }
+        handleError(error, errorDescription, errorType);
+        if (retries > 1) {
+            const delayMs = 250 + randomNumber(100);
+            log(hostname + " HTTPS request  - failed, retrying in " + delayMs + " ms");
+            setTimeout(() => { httpsGet(hostname, timeoutInMillis, retries - 1, path, args, headers, callback); }, delayMs);
+        } else {
+            log(hostname + " HTTPS request  - failed, no more retries");
+            callback();
+        }
+    };
+    
     const request = https.request(options, (response) => {
-        log(hostname + ' - Response Code: ' + response.statusCode);
+        statusCode = response.statusCode;
+        log(hostname + ' - Response Code: ' + statusCode);
         let body = '';
         response.on('data', (data) => { body += data; });
         response.on('end', () => {
-            
-            const responseTime = process.hrtime(startTime);
-            const responseTimeInMillis = ((responseTime[0] + (responseTime[1] / 1e9)) * 1000).toFixed(2);
-            
-            log(hostname + ' - Response Time: ' + responseTimeInMillis + ' milliseconds');
-            
-            var params = {
-              MetricData: [{ MetricName: 'HTTP-ResponseTime', Dimensions: [{ Name: 'Hostname', Value: hostname }], Unit: 'Milliseconds', Value: responseTimeInMillis }],
-              Namespace: 'HowFarLambda'
-            };
-            
-            cloudwatch.putMetricData(params, (error) => { if (error) console.error(error); });
-            
-            callback(JSON.parse(body));
+            if (statusCode == 200) {
+                const responseTime = process.hrtime(startTime);
+                const responseTimeInMillis = parseFloat(((responseTime[0] + (responseTime[1] / 1e9)) * 1000).toFixed(2));
+                
+                log(hostname + ' - Response Time: ' + responseTimeInMillis + ' milliseconds');
+                emitCloudWatchMetric('HTTP-ResponseTime', 'Milliseconds', responseTimeInMillis, 'Hostname', hostname);
+                callback(JSON.parse(body));
+            } else {
+                handleHttpsError(request, '', hostname + " HTTPS request - status code is " + statusCode);
+            }
         });
     });
     
     if (request) {
-        request.setTimeout(timeoutInMillis - 100, () => { console.error( "[" + hostname + "] request has timed out after " + timeoutInMillis + " milliseconds" ); callback(); });
-        request.on('error', (error) => { console.error(error); callback(); });
+        request.setTimeout(timeoutInMillis, () => { 
+            timedOut = true;
+            handleHttpsError(request, '', hostname + " HTTPS request - timed out after " + timeoutInMillis + " ms"); 
+        });
+        request.on('error', (error) => { 
+            if (! timedOut) {
+                handleHttpsError(request, error, hostname + " HTTPS request - failed to send"); 
+            }
+        });
         request.end();
     } else {
-        console.error('Failed to create an HTTPS request');
-        callback();
+        handleHttpsError(request, '', hostname + " HTTPS request - failed to create");
     }
 }
 
@@ -167,9 +213,8 @@ function setDefaultOrigin(self, callbackWhenDone){
         let deviceId = getDeviceId(self);
         let path = '/v1/devices/' + deviceId + '/settings/address/countryAndPostalCode';
         
-        httpGet(ALEXA_ENDPOINT, 1000, path, {}, { Authorization: 'Bearer ' + consentToken }, 
+        httpsGet(ALEXA_ENDPOINT, ALEXA_ENDPOINT_TIMEOUT, ALEXA_ENDPOINT_RETRIES, path, {}, { Authorization: 'Bearer ' + consentToken }, 
                 (result) => {
-                    log(result);
                     if (result && result.postalCode && result.postalCode.match(/^[0-9]+$/)) {
                         let postalCode = result.postalCode;
                         self.attributes.defaultOrigin = postalCode;
@@ -217,7 +262,7 @@ function getDrivingDays(duration) {
 function howFar(location, origin, callback){
     log("Getting driving directions from [" + origin + "] to [" + location + "]");
     
-    httpGet(MAPS_ENDPOINT, 2500, '/maps/api/directions/json', { 
+    httpsGet(MAPS_ENDPOINT, MAPS_ENDPOINT_TIMEOUT, MAPS_ENDPOINT_RETRIES, '/maps/api/directions/json', { 
         origin: origin,
         destination: location,
         mode: 'driving',
@@ -233,16 +278,17 @@ function howFar(location, origin, callback){
                 let distance = (leg.distance.text || 'NoDistance').
                                replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
                 let drivingDays = getDrivingDays(duration);
-                let fierries = (leg.steps || []).filter(step => step.maneuver && (step.maneuver.toLowerCase() === 'ferry')).length;  
-                log("[" + origin + "] => [" + location + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]/[" + fierries + " ferries]");
+                let ferries = (leg.steps || []).filter(step => 'ferry' === step.maneuver).length;  
+                log("[" + origin + "] => [" + location + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]/[" + ferries + " ferries]");
                 response = '<say-as interpret-as="address">' + location + '</say-as> is ' + duration + 
-                           (fierries < 1 ? '' : ' and ' + fierries + ' ' + (fierries == 1 ? 'ferry' : 'ferries')) + 
+                           (ferries < 1 ? '' : ' and ' + ferries + ' ' + (ferries == 1 ? 'ferry' : 'ferries')) + 
                            ' away (or ' + distance + ') from <say-as interpret-as="address">' + origin + '</say-as>.' + 
                            (drivingDays > 1 ? ' <break time="0.03s"/>That\'ll be about ' + drivingDays + ' days driving.' : 
-                                            '');
+                                              '');
             } else {
-                log("[" + origin + "] => [" + location + "]: no route available");
-                response = noRouteResponse() + ' to <say-as interpret-as="address">' + location + '</say-as> from <say-as interpret-as="address">' + origin + '</say-as>.';
+                log("[" + origin + "] => [" + location + "]: no route found");
+                response = noRouteResponse() +
+                           ' to <say-as interpret-as="address">' + location + '</say-as> from <say-as interpret-as="address">' + origin + '</say-as>.';
             }
             
             callback(response + '\n\n' + waitingForInputDelayed);
@@ -288,11 +334,10 @@ const handlers = {
 
 
 exports.handler = (event, context) => {
-    log('------- [' + event.request.type + '][' + (event.request.intent ? event.request.intent.name : '') + '] ---------------------------------------------------------------------');
+    let isTestRequest = ! (event.context && event.context.System && event.context.System.user && event.context.System.user.userId);
+    log('------- [' + event.request.type + '][' + (event.request.intent ? event.request.intent.name : '') + ']' + (isTestRequest ? '[TEST]' : '') + ' ---------------------------------------------------------------------');
     var alexa = Alexa.handler(event, context);
     alexa.APP_ID = APP_ID;
-    // To enable string internationalization (i18n) features, set a resources object.
-    //alexa.resources = languageStrings;
     alexa.registerHandlers(handlers);
     alexa.execute();
 };
