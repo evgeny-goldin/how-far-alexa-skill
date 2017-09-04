@@ -28,15 +28,15 @@ const defaultOrigin = 'Seattle, WA';
 const CloudWatchNamespace = 'HowFarLambda';
 
 const samplePhrases = [
-    'Mexico City', 
-    '98006',
-    'How far is Vegas from LAX ?'
+    'Yellowstone Park', 
+    'Vienna from Munich',
+    'Las Vegas from LAX'
 ];
 
 const welcomeMessage = 'Welcome to "How Far" Alexa skill <break time="0.05s"/> telling how far your destination is in driving hours. ' + 
-                       'You can say <break time="0.25s"/> <say-as interpret-as="address"> ' + samplePhrases[0] + ' </say-as>, ' +  
-                       '<break time="0.4s"/> <say-as interpret-as="address"> ' + samplePhrases[1] + ' </say-as><break time="0.3s"/> ' + 
-                       'Or <break time="0.3s"/> ' + samplePhrases[2] + '.';  
+                       'You can say <break time="0.25s"/> ' + samplePhrases[0] + ', ' +  
+                       '<break time="0.4s"/> ' + samplePhrases[1] + ' <break time="0.3s"/>' + 
+                       'or <break time="0.3s"/> ' + samplePhrases[2] + '.';  
                       
 const welcomeSpeechOutput = welcomeMessage + waitingForInputDelayed;
                       
