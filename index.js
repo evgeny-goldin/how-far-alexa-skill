@@ -1,4 +1,3 @@
-// * Emit errors metric
 // * Accept departure time
 // * Allow updating user's default origin
 
@@ -103,14 +102,17 @@ function tellWelcomeMessage(self) {
 function handleError(error, errorDescription, errorType) {
     console.error('++++++++++ [' + errorDescription + '] ++++++++++'); 
     console.error(error || errorDescription); 
-    console.error('++++++++++ [' + errorDescription + '] ++++++++++'); 
-    emitCloudWatchMetric('LoggedError', 'Count', 1, 'ErrorType', errorType, errorType != 'EmitCloudWatchMetric');
+    console.error('++++++++++ [' + errorDescription + '] ++++++++++');
+    
+    if (errorType) {
+        emitCloudWatchMetric('LoggedError', 'Count', 1, 'ErrorType', errorType);
+    }
 }
 
-function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue, emitMetricIfFailed = true) {
+function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue) {
     // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/CloudWatch.html#putMetricData-property
     log("Emitting CloudWatch " + CloudWatchNamespace + " metric [" + name + "] = [" + value + "] (" + unit + ", " + dimensionName + " = " + dimensionValue + ")")
-    let params = { 
+    const params = { 
         Namespace: CloudWatchNamespace, 
         MetricData: [{ 
            MetricName: name, 
@@ -121,8 +123,9 @@ function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue, 
     };
     
     cloudwatch.putMetricData(params, (error) => { 
-        if (error) {
-            handleError(error, 'Failed emittting CloudWatch metric', 'EmitCloudWatchMetric');
+        if (error) { 
+            // *DO NOT* specify an error type or it'll attempt to emit another metric
+            handleError(error, 'Failed emitting CloudWatch metric'); 
         }
     });
 }
