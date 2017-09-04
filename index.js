@@ -23,7 +23,7 @@ const MAPS_ENDPOINT_RETRIES = 3;
 const waitingForInput = 'Where would you like to go?';
 const waitingForInputDelayed = ' <break time="0.5s"/> ' + waitingForInput;
 const drivingHoursPerDay = 8;
-const defaultLocation = 'Seattle, WA';
+const defaultDestination = 'Seattle, WA';
 const defaultOrigin = 'Seattle, WA';
 const CloudWatchNamespace = 'HowFarLambda';
 
@@ -31,7 +31,7 @@ const samplePhrases = [
     'Mexico City', 
     '98006',
     'How far is Vegas from LAX ?'
-]
+];
 
 const welcomeMessage = 'Welcome to "How Far" Alexa skill <break time="0.05s"/> telling how far your destination is in driving hours. ' + 
                        'You can say <break time="0.25s"/> <say-as interpret-as="address"> ' + samplePhrases[0] + ' </say-as>, ' +  
@@ -93,9 +93,9 @@ function askWithCard(self, speechOutput, repromptSpeech, cardTitle, cardContent)
 }
 
 function tellWelcomeMessage(self) {
-    let speechOutput = welcomeMessage + 
-                       " <break time='0.3s'/> Your location is set to <say-as interpret-as='address'>" + getDefaultOrigin(self) + "</say-as>. " + 
-                       waitingForInputDelayed; 
+    const speechOutput = welcomeMessage + 
+                         " <break time='0.3s'/> Your location is set to <say-as interpret-as='address'>" + getDefaultOrigin(self) + "</say-as>. " + 
+                         waitingForInputDelayed; 
     askWithCard(self, speechOutput, waitingForInput, waitingForInput, welcomeCardContent);
 }
 
@@ -111,7 +111,7 @@ function handleError(error, errorDescription, errorType) {
 
 function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue) {
     // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/CloudWatch.html#putMetricData-property
-    log("Emitting CloudWatch " + CloudWatchNamespace + " metric [" + name + "] = [" + value + "] (" + unit + ", " + dimensionName + " = " + dimensionValue + ")")
+    log("Emitting CloudWatch " + CloudWatchNamespace + " metric [" + name + "] = [" + value + "] (" + unit + ", " + dimensionName + " = " + dimensionValue + ")");
     const params = { 
         Namespace: CloudWatchNamespace, 
         MetricData: [{ 
@@ -130,11 +130,12 @@ function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue) 
     });
 }
 
-// HTTP GET wrapper
+// HTTPS GET wrapper
 function httpsGet(hostname, timeoutInMillis, retries, path, args, headers, callback) {
 
     // https://nodejs.org/api/https.html#https_https_request_options_callback
     // https://nodejs.org/api/http.html#http_http_request_options_callback
+    const errorType = 'HttpsGet-' + hostname;
     const options = {
         hostname: hostname,
         path: path + '?' + querystring.stringify(args),
@@ -142,10 +143,8 @@ function httpsGet(hostname, timeoutInMillis, retries, path, args, headers, callb
         method: 'GET'
     };
     
-    log(' ==> [https://' + options.hostname + options.path + '], timeout is ' + timeoutInMillis + ' ms, ' + retries + ' retries');
+    log(' ==> [https://' + hostname + options.path + '], timeout is ' + timeoutInMillis + ' ms, ' + retries + ' retries');
     
-    const startTime = process.hrtime();
-    const errorType = 'HttpsGet-' + hostname;
     let statusCode  = -1;
     let timedOut = false;
     
@@ -154,14 +153,16 @@ function httpsGet(hostname, timeoutInMillis, retries, path, args, headers, callb
         handleError(error, errorDescription, errorType);
         if (retries > 1) {
             const delayMs = 250 + randomNumber(100);
-            log(hostname + " HTTPS request  - failed, retrying in " + delayMs + " ms");
-            setTimeout(() => { httpsGet(hostname, timeoutInMillis, retries - 1, path, args, headers, callback); }, delayMs);
+            log(hostname + " HTTPS request - failed, retrying in " + delayMs + " ms");
+            setTimeout(() => { httpsGet(hostname, timeoutInMillis, retries - 1, path, args, headers, callback); }, 
+                       delayMs);
         } else {
-            log(hostname + " HTTPS request  - failed, no more retries");
+            log(hostname + " HTTPS request - failed, no more retries");
             callback();
         }
     };
     
+    const startTime = process.hrtime();
     const request = https.request(options, (response) => {
         statusCode = response.statusCode;
         log(hostname + ' - Response Code: ' + statusCode);
@@ -171,8 +172,8 @@ function httpsGet(hostname, timeoutInMillis, retries, path, args, headers, callb
             if (statusCode == 200) {
                 const responseTime = process.hrtime(startTime);
                 const responseTimeInMillis = parseFloat(((responseTime[0] + (responseTime[1] / 1e9)) * 1000).toFixed(2));
-                
-                log(hostname + ' - Response Time: ' + responseTimeInMillis + ' milliseconds');
+
+                log(hostname + ' - Response Time: ' + responseTimeInMillis + ' ms');
                 emitCloudWatchMetric('HTTP-ResponseTime', 'Milliseconds', responseTimeInMillis, 'Hostname', hostname);
                 callback(JSON.parse(body));
             } else {
@@ -206,36 +207,35 @@ function getDeviceId(self) {
 }
 
 // https://developer.amazon.com/public/solutions/alexa/alexa-skills-kit/docs/device-address-api#get-the-consent-token-and-device-id
-function setDefaultOrigin(self, callbackWhenDone){
-    let context = self.event.context;
+function setDefaultOrigin(self, callback){
+    const context = self.event.context;
     self.attributes.defaultOrigin = defaultOrigin;
     
     if (context.System.user.permissions && context.System.user.permissions.consentToken) {
         
-        let consentToken = context.System.user.permissions.consentToken;
-        let deviceId = getDeviceId(self);
-        let path = '/v1/devices/' + deviceId + '/settings/address/countryAndPostalCode';
+        const consentToken = context.System.user.permissions.consentToken;
+        const deviceId = getDeviceId(self);
+        const path = '/v1/devices/' + deviceId + '/settings/address/countryAndPostalCode';
         
         httpsGet(ALEXA_ENDPOINT, ALEXA_ENDPOINT_TIMEOUT, ALEXA_ENDPOINT_RETRIES, path, {}, { Authorization: 'Bearer ' + consentToken }, 
                 (result) => {
                     if (result && result.postalCode && result.postalCode.match(/^[0-9]+$/)) {
-                        let postalCode = result.postalCode;
-                        self.attributes.defaultOrigin = postalCode;
+                        self.attributes.defaultOrigin = result.postalCode;
                         log("Default origin is set to [" + getDefaultOrigin(self) + "] for [" + deviceId + "]");
                     } else {
                         log("Numeric postal code is not available in result, default origin is still [" + getDefaultOrigin(self) + "]");
                     }
-                    callbackWhenDone();
+                    callback();
                 });
     } else {
         // No consentToken or deviceId available
         log("ConsentToken is not available in request, default origin is still [" + getDefaultOrigin(self) + "]");
-        callbackWhenDone();
+        callback();
     }
 }
 
 function getDefaultOrigin(self) {
-    return self.attributes.defaultOrigin || defaultOrigin;
+    return (self.attributes.defaultOrigin || defaultOrigin);
 }
 
 function hasData(array){
@@ -243,17 +243,18 @@ function hasData(array){
 }
 
 function getDrivingDays(duration) {
-    let isDays = duration.includes('day');
-    let isHours = duration.includes('hour');
+    const isDays = duration.includes('day');
+    const isHours = duration.includes('hour');
     if (isDays || isHours) {
-        let match = isDays && isHours ? duration.match(/(\d+)\s+days?\s+(\d+)\s+hours?/) :
-                    isDays            ? duration.match(/(\d+)\s+days?/) :
-                    isHours           ? duration.match(/(\d+)\s+hours?/) : 
-                                        null;
+        const match = isDays && isHours ? duration.match(/(\d+)\s+days?\s+(\d+)\s+hours?/) :
+                      isDays            ? duration.match(/(\d+)\s+days?/) :
+                      isHours           ? duration.match(/(\d+)\s+hours?/) : 
+                                          null;
         if (match) {
-            let days = isDays ? match[1] : 0;
-            let hours = isDays && isHours ? match[2] : 
-                        isHours           ? match[1] : 0;
+            const days  = isDays ? match[1] : 0;
+            const hours = isDays && isHours ? match[2] : 
+                          isHours           ? match[1] : 
+                                              0;
             return Math.ceil(((parseInt(days) * 24) + parseInt(hours)) / drivingHoursPerDay);
         }
     }
@@ -262,12 +263,12 @@ function getDrivingDays(duration) {
 
 // https://developers.google.com/maps/documentation/directions/intro
 // https://maps.googleapis.com/maps/api/directions/json?origin=98006&destination=98008&mode=driving&alternatives=false&key=???
-function howFar(location, origin, callback){
-    log("Getting driving directions from [" + origin + "] to [" + location + "]");
+function howFar(destination, origin, callback){
+    log("[" + origin + "] => [" + destination + "]");
     
     httpsGet(MAPS_ENDPOINT, MAPS_ENDPOINT_TIMEOUT, MAPS_ENDPOINT_RETRIES, '/maps/api/directions/json', { 
         origin: origin,
-        destination: location,
+        destination: destination,
         mode: 'driving',
         alternatives: 'false',
         key: process.env.MAPS_API_KEY
@@ -275,23 +276,24 @@ function howFar(location, origin, callback){
         if (result) {
             let response = ''
             if (hasData(result.routes) && hasData(result.routes[0].legs)){
-                let leg = result.routes[0].legs[0];
-                let duration = (leg.duration.text || 'NoDuration').
-                               replace(/ 0 mins/, '').replace(/ 0 hours/, '');  // (Vegas from 92708, Miami beach from Seattle, WA)
-                let distance = (leg.distance.text || 'NoDistance').
-                               replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
-                let drivingDays = getDrivingDays(duration);
-                let ferries = (leg.steps || []).filter(step => 'ferry' === step.maneuver).length;  
-                log("[" + origin + "] => [" + location + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]/[" + ferries + " ferries]");
-                response = '<say-as interpret-as="address">' + location + '</say-as> is ' + duration + 
+                const leg = result.routes[0].legs[0];
+                const duration = (leg.duration.text || 'NoDuration').
+                                 replace(/ 0 mins/, '').replace(/ 0 hours/, '');
+                const distance = (leg.distance.text || 'NoDistance').
+                                 replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
+                const drivingDays = getDrivingDays(duration);
+                const ferries = (leg.steps || []).filter(step => 'ferry' === step.maneuver).length;  
+                
+                log("[" + origin + "] => [" + destination + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]/[" + ferries + " ferries]");
+                response = '<say-as interpret-as="address">' + destination + '</say-as> is ' + duration + 
                            (ferries < 1 ? '' : ' and ' + ferries + ' ' + (ferries == 1 ? 'ferry' : 'ferries')) + 
                            ' away (or ' + distance + ') from <say-as interpret-as="address">' + origin + '</say-as>.' + 
                            (drivingDays > 1 ? ' <break time="0.03s"/>That\'ll be about ' + drivingDays + ' days driving.' : 
                                               '');
             } else {
-                log("[" + origin + "] => [" + location + "]: no route found");
+                log("[" + origin + "] => [" + destination + "]: no route found");
                 response = noRouteResponse() +
-                           ' to <say-as interpret-as="address">' + location + '</say-as> from <say-as interpret-as="address">' + origin + '</say-as>.';
+                           ' to <say-as interpret-as="address">' + destination + '</say-as> from <say-as interpret-as="address">' + origin + '</say-as>.';
             }
             
             callback(response + '\n\n' + waitingForInputDelayed);
@@ -324,20 +326,24 @@ const handlers = {
     },
     'HowFarIntent': function () {
         logEvent(this);
-        let slots = this.event.request.intent.slots;
+        const slots = this.event.request.intent.slots;
         log(slots);
-        let location = slotValue(slots.Location, defaultLocation).replace(/^\s*is\s*/, ''); // Occasionally, location is read as "is <Location>"
-        let origin = slotValue(slots.Origin, getDefaultOrigin(this));
+        const destination = slotValue(slots.Destination, defaultDestination).
+                            replace(/^\s*is\s*/, ''); // Occasionally, destination is read as "is <Destination>"
+        const origin = slotValue(slots.Origin, getDefaultOrigin(this));
 
-        howFar(location, origin, (response) => {  
-            askWithCard(this, response, waitingForInput, 'How Far is ' + location + ' from ' + origin + '?');
+        howFar(destination, origin, (response) => {  
+            askWithCard(this, response, waitingForInput, 'How Far is ' + destination + ' from ' + origin + '?');
         });
     }
 };
 
 
 exports.handler = (event, context) => {
-    let isTestRequest = ! (event.context && event.context.System && event.context.System.user && event.context.System.user.userId);
+    const isTestRequest = ! (event.context && 
+                             event.context.System && 
+                             event.context.System.user && event.context.System.user.userId && 
+                             event.context.System.device && event.context.System.device.deviceId);
     log('------- [' + event.request.type + '][' + (event.request.intent ? event.request.intent.name : '') + ']' + (isTestRequest ? '[TEST]' : '') + ' ---------------------------------------------------------------------');
     var alexa = Alexa.handler(event, context);
     alexa.APP_ID = APP_ID;
