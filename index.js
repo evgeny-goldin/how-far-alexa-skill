@@ -1,3 +1,4 @@
+// * Submit errors to SNS topic
 // * Accept departure time
 // * Allow updating user's default origin
 
@@ -209,27 +210,36 @@ function getDeviceId(self) {
 // https://developer.amazon.com/public/solutions/alexa/alexa-skills-kit/docs/device-address-api#get-the-consent-token-and-device-id
 function setDefaultOrigin(self, callback){
     const context = self.event.context;
-    self.attributes.defaultOrigin = defaultOrigin;
+    const currentDefaultOrigin = getDefaultOrigin(self);
     
-    if (context.System.user.permissions && context.System.user.permissions.consentToken) {
+    if (currentDefaultOrigin === defaultOrigin) {
+        // Default origin is unmodified (still Seatlle), let's see if user permissions contain consentToken
+        log("Default origin is still [" + currentDefaultOrigin + "], checking user permissions in request");
         
-        const consentToken = context.System.user.permissions.consentToken;
-        const deviceId = getDeviceId(self);
-        const path = '/v1/devices/' + deviceId + '/settings/address/countryAndPostalCode';
-        
-        httpsGet(ALEXA_ENDPOINT, ALEXA_ENDPOINT_TIMEOUT, ALEXA_ENDPOINT_RETRIES, path, {}, { Authorization: 'Bearer ' + consentToken }, 
-                (result) => {
-                    if (result && result.postalCode && result.postalCode.match(/^[0-9]+$/)) {
-                        self.attributes.defaultOrigin = result.postalCode;
-                        log("Default origin is set to [" + getDefaultOrigin(self) + "] for [" + deviceId + "]");
-                    } else {
-                        log("Numeric postal code is not available in result, default origin is still [" + getDefaultOrigin(self) + "]");
-                    }
-                    callback();
-                });
+        if (context.System.user.permissions && context.System.user.permissions.consentToken) {
+            
+            log("ConsentToken is available in request");
+            const consentToken = context.System.user.permissions.consentToken;
+            const deviceId = getDeviceId(self);
+            const path = '/v1/devices/' + deviceId + '/settings/address/countryAndPostalCode';
+            
+            httpsGet(ALEXA_ENDPOINT, ALEXA_ENDPOINT_TIMEOUT, ALEXA_ENDPOINT_RETRIES, path, {}, { Authorization: 'Bearer ' + consentToken }, 
+                    (result) => {
+                        if (result && result.postalCode && result.postalCode.match(/^[0-9]+$/)) {
+                            self.attributes.defaultOrigin = result.postalCode;
+                            log("Default origin is set to [" + getDefaultOrigin(self) + "] for [" + deviceId + "]");
+                        } else {
+                            log("Numeric postal code is not available in result, default origin is still [" + getDefaultOrigin(self) + "]");
+                        }
+                        callback();
+                    });
+        } else {
+            // No consentToken or deviceId available
+            log("ConsentToken is not available in request, default origin is still [" + getDefaultOrigin(self) + "]");
+            callback();
+        }
     } else {
-        // No consentToken or deviceId available
-        log("ConsentToken is not available in request, default origin is still [" + getDefaultOrigin(self) + "]");
+        log("Default origin is already modified to [" + getDefaultOrigin(self) + "]");
         callback();
     }
 }
@@ -310,7 +320,7 @@ const handlers = {
     },
     'AMAZON.HelpIntent': function () {
         logEvent(this);
-        tellWelcomeMessage(this);
+        setDefaultOrigin(this, () => tellWelcomeMessage(this));
     },
     'AMAZON.CancelIntent': function () {
         logEvent(this);
@@ -328,12 +338,13 @@ const handlers = {
         logEvent(this);
         const slots = this.event.request.intent.slots;
         log(slots);
-        const destination = slotValue(slots.Destination, defaultDestination).
-                            replace(/^\s*is\s*/, ''); // Occasionally, destination is read as "is <Destination>"
-        const origin = slotValue(slots.Origin, getDefaultOrigin(this));
-
-        howFar(destination, origin, (response) => {  
-            askWithCard(this, response, waitingForInput, 'How Far is ' + destination + ' from ' + origin + '?');
+        setDefaultOrigin(this, () => {
+            const destination = slotValue(slots.Destination, defaultDestination).
+                                replace(/^\s*is\s*/, ''); // Occasionally, destination is read as "is <Destination>"
+            const origin = slotValue(slots.Origin, getDefaultOrigin(this));
+            howFar(destination, origin, (response) => {  
+                askWithCard(this, response, waitingForInput, 'How Far is ' + destination + ' from ' + origin + '?');
+            });
         });
     }
 };
