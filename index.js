@@ -1,4 +1,3 @@
-// * Submit errors to SNS topic
 // * Accept departure time
 // * Allow updating user's default origin
 
@@ -12,7 +11,10 @@ const https = require('https');
 const querystring = require('querystring');
 
 const cloudwatch = new AWS.CloudWatch({apiVersion: '2010-08-01'});
+const sns = new AWS.SNS({apiVersion: '2010-03-31'});
+
 const APP_ID = 'amzn1.ask.skill.77f9ca28-bcb2-453c-9795-69039d37c8fe';
+const ERRORS_SNS_TOPIC = 'arn:aws:sns:us-east-1:315557731078:NotifyMe';
 
 const ALEXA_ENDPOINT = 'api.amazonalexa.com';
 const MAPS_ENDPOINT = 'maps.googleapis.com';
@@ -29,7 +31,7 @@ const defaultOrigin = 'Seattle, WA';
 const CloudWatchNamespace = 'HowFarLambda';
 
 const samplePhrases = [
-    'Yellowstone Park', 
+    'Yellowstone Park',
     'Vienna from Munich',
     'Las Vegas from LAX'
 ];
@@ -100,14 +102,30 @@ function tellWelcomeMessage(self) {
     askWithCard(self, speechOutput, waitingForInput, waitingForInput, welcomeCardContent);
 }
 
-function handleError(error, errorDescription, errorType) {
-    console.error('++++++++++ [' + errorDescription + '] ++++++++++'); 
+function logError(error, errorDescription) {
+    console.error('++++++++++ [' + errorDescription + '] ++++++++++');
     console.error(error || errorDescription); 
     console.error('++++++++++ [' + errorDescription + '] ++++++++++');
-    
+}
+
+function handleError(error, errorDescription, errorType) {
+    logError(error, errorDescription);
+    publishSNSMessage(error.stack || errorDescription, 'HowFar - error logged', ERRORS_SNS_TOPIC);
     if (errorType) {
         emitCloudWatchMetric('LoggedError', 'Count', 1, 'ErrorType', errorType);
     }
+}
+
+function publishSNSMessage(message, subject, topicName) {
+    log('Publishing SNS message [' + message + '], subject [' + subject + '] to [' + topicName + ']'); 
+    // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/SNS.html#publish-property
+    sns.publish({ Message: '===============\n' + message + '\n===============', 
+                  Subject: subject, 
+                  TopicArn: topicName }, (error) => {
+        if (error) { 
+            logError(error, 'Failed to publish SNS message [' + message + '], subject [' + subject + '] to [' + topicName + ']'); 
+        }
+    });
 }
 
 function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue) {
@@ -126,7 +144,7 @@ function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue) 
     cloudwatch.putMetricData(params, (error) => { 
         if (error) { 
             // *DO NOT* specify an error type or it'll attempt to emit another metric
-            handleError(error, 'Failed emitting CloudWatch metric'); 
+            handleError(error, 'Failed emitting CloudWatch metric [' + name + ']'); 
         }
     });
 }
@@ -158,7 +176,7 @@ function httpsGet(hostname, timeoutInMillis, retries, path, args, headers, callb
             setTimeout(() => { httpsGet(hostname, timeoutInMillis, retries - 1, path, args, headers, callback); }, 
                        delayMs);
         } else {
-            log(hostname + " HTTPS request - failed, no more retries");
+            log(hostname + " HTTPS request - failed, no more retries left");
             callback();
         }
     };
@@ -170,12 +188,13 @@ function httpsGet(hostname, timeoutInMillis, retries, path, args, headers, callb
         let body = '';
         response.on('data', (data) => { body += data; });
         response.on('end', () => {
-            if (statusCode == 200) {
-                const responseTime = process.hrtime(startTime);
-                const responseTimeInMillis = parseFloat(((responseTime[0] + (responseTime[1] / 1e9)) * 1000).toFixed(2));
+            const responseTime = process.hrtime(startTime);
+            const responseTimeInMillis = parseFloat(((responseTime[0] + (responseTime[1] / 1e9)) * 1000).toFixed(2));
 
-                log(hostname + ' - Response Time: ' + responseTimeInMillis + ' ms');
-                emitCloudWatchMetric('HTTP-ResponseTime', 'Milliseconds', responseTimeInMillis, 'Hostname', hostname);
+            log(hostname + ' - Response Time: ' + responseTimeInMillis + ' ms');
+            emitCloudWatchMetric('HTTP-ResponseTime', 'Milliseconds', responseTimeInMillis, 'Hostname', hostname);
+            
+            if (statusCode == 200) {
                 callback(JSON.parse(body));
             } else {
                 handleHttpsError(request, '', hostname + " HTTPS request - status code is " + statusCode);
@@ -213,10 +232,10 @@ function setDefaultOrigin(self, callback){
     const currentDefaultOrigin = getDefaultOrigin(self);
     
     if (currentDefaultOrigin === defaultOrigin) {
-        // Default origin is unmodified (still Seatlle), let's see if user permissions contain consentToken
         log("Default origin is still [" + currentDefaultOrigin + "], checking user permissions in request");
         
-        if (context.System.user.permissions && context.System.user.permissions.consentToken) {
+        if (context && context.System && context.System.user && 
+            context.System.user.permissions && context.System.user.permissions.consentToken) {
             
             log("ConsentToken is available in request");
             const consentToken = context.System.user.permissions.consentToken;
@@ -225,16 +244,16 @@ function setDefaultOrigin(self, callback){
             
             httpsGet(ALEXA_ENDPOINT, ALEXA_ENDPOINT_TIMEOUT, ALEXA_ENDPOINT_RETRIES, path, {}, { Authorization: 'Bearer ' + consentToken }, 
                     (result) => {
-                        if (result && result.postalCode && result.postalCode.match(/^[0-9]+$/)) {
+                        log(result);
+                        if (result && result.postalCode) {
                             self.attributes.defaultOrigin = result.postalCode;
                             log("Default origin is set to [" + getDefaultOrigin(self) + "] for [" + deviceId + "]");
                         } else {
-                            log("Numeric postal code is not available in result, default origin is still [" + getDefaultOrigin(self) + "]");
+                            log("Postal code is not available in response, default origin is still [" + getDefaultOrigin(self) + "]");
                         }
                         callback();
                     });
         } else {
-            // No consentToken or deviceId available
             log("ConsentToken is not available in request, default origin is still [" + getDefaultOrigin(self) + "]");
             callback();
         }
@@ -304,6 +323,9 @@ function howFar(destination, origin, callback){
                 log("[" + origin + "] => [" + destination + "]: no route found");
                 response = noRouteResponse() +
                            ' to <say-as interpret-as="address">' + destination + '</say-as> from <say-as interpret-as="address">' + origin + '</say-as>.';
+                if (origin.includes(' to ') || destination.includes(' to ')) {
+                    response += ' I can understand questions like <break time="0.1s"/> Las Vegas <break time="0.05s"/> or <break time="0.1s"/> Las Vegas from LAX.';    
+                }
             }
             
             callback(response + '\n\n' + waitingForInputDelayed);
@@ -322,6 +344,19 @@ const handlers = {
         logEvent(this);
         setDefaultOrigin(this, () => tellWelcomeMessage(this));
     },
+    'HowFarIntent': function () {
+        logEvent(this);
+        const slots = this.event.request.intent.slots;
+        log(slots);
+        setDefaultOrigin(this, () => {
+            const destination = slotValue(slots.Destination, defaultDestination).
+                                replace(/^\s*is\s*/, ''); // Destination may read as "is <Destination>"
+            const origin = slotValue(slots.Origin, getDefaultOrigin(this));
+            howFar(destination, origin, (response) => {  
+                askWithCard(this, response, waitingForInput, 'How Far is ' + destination + ' from ' + origin + '?');
+            });
+        });
+    },
     'AMAZON.CancelIntent': function () {
         logEvent(this);
         tellWithCard(this, complyResponse(), 'Session Ended', 'Bye-bye for now!');
@@ -333,19 +368,6 @@ const handlers = {
     'SessionEndedRequest': function () {
         logEvent(this);
         tellWithCard(this, complyResponse(), 'Session Ended', 'Bye-bye for now!');
-    },
-    'HowFarIntent': function () {
-        logEvent(this);
-        const slots = this.event.request.intent.slots;
-        log(slots);
-        setDefaultOrigin(this, () => {
-            const destination = slotValue(slots.Destination, defaultDestination).
-                                replace(/^\s*is\s*/, ''); // Occasionally, destination is read as "is <Destination>"
-            const origin = slotValue(slots.Origin, getDefaultOrigin(this));
-            howFar(destination, origin, (response) => {  
-                askWithCard(this, response, waitingForInput, 'How Far is ' + destination + ' from ' + origin + '?');
-            });
-        });
     }
 };
 
