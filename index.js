@@ -1,6 +1,5 @@
-// * Accept departure time
-// * Allow updating user's default origin
 
+// * Allow updating user's default origin
 
 'use strict';
 
@@ -14,7 +13,7 @@ const cloudwatch = new AWS.CloudWatch({apiVersion: '2010-08-01'});
 const sns = new AWS.SNS({apiVersion: '2010-03-31'});
 
 const APP_ID = 'amzn1.ask.skill.77f9ca28-bcb2-453c-9795-69039d37c8fe';
-const ERRORS_SNS_TOPIC = 'arn:aws:sns:us-east-1:315557731078:NotifyMe';
+const ERRORS_SNS_TOPIC = 'arn:aws:sns:us-east-1:315557731078:HowFarErrors';
 
 const ALEXA_ENDPOINT = 'api.amazonalexa.com';
 const MAPS_ENDPOINT = 'maps.googleapis.com';
