@@ -1,4 +1,3 @@
-
 // * Allow updating user's default origin
 
 'use strict';
@@ -49,9 +48,14 @@ const log = console.log;
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 function logEvent(self) {
-    log(self.event);
+    if (self.event) { log(self.event); }
     log("User: " + getUserId(self));
     log("Device: " + getDeviceId(self));
+}
+
+function isPostalCode(s) {
+    // US postal codes only so far, other countries may use letter as well
+    return (s.match(/^\d+$/) !== null);
 }
 
 function randomNumber(topNumber) {
@@ -66,18 +70,16 @@ function complyResponse() {
     return random(['Sure!', 'OK!', 'Done!', 'Got it', 'Done deal']);
 }
 
-function noRouteResponse() {
-    return random(['Hmm', 'Oh dear', 'Oh']) + ', ' +
-           random(["I'm afraid", "it looks like"]) + ' ' + 
-           random(["you can't drive", "there is no route", "there is no way", "there is no way to drive"]);
-}
-
 function slotValue(slot, defaultValue) {
     return (slot ? (slot.value || defaultValue) : defaultValue);
 }
 
 function clearTags(s) {
     return (s || '').replace(/<[^>]+>/g, '');
+}
+
+function sayAsAddress(s) {
+    return '<say-as interpret-as="address">' + s + '</say-as>';
 }
 
 function tellWithCard(self, speechOutput, cardTitle, cardContent) {
@@ -96,7 +98,7 @@ function askWithCard(self, speechOutput, repromptSpeech, cardTitle, cardContent)
 
 function tellWelcomeMessage(self) {
     const speechOutput = welcomeMessage + 
-                         " <break time='0.3s'/> Your location is set to <say-as interpret-as='address'>" + getDefaultOrigin(self) + "</say-as>. " + 
+                         " <break time='0.3s'/> Your location is set to " + sayAsAddress(getDefaultOrigin(self)) + ". " + 
                          waitingForInputDelayed; 
     askWithCard(self, speechOutput, waitingForInput, waitingForInput, welcomeCardContent);
 }
@@ -115,6 +117,29 @@ function handleError(error, errorDescription, errorType) {
     }
 }
 
+function updateSessionMetrics(self, isUtterance, sessionEnded) {
+    if (self.attributes.sessionStarted) {
+        // Session has already started
+        if (isUtterance){ 
+            self.attributes.utterances += 1; 
+        }
+    } else {
+        // New session
+        self.attributes.sessionStarted = Date.now();
+        self.attributes.utterances = isUtterance ? 1 : 0;
+    }
+    
+    const sessionLengthInSeconds = ((Date.now() - self.attributes.sessionStarted) / 1000);
+    
+    if (sessionEnded) {
+        log('Session ended: ' + self.attributes.utterances + ' utterances, lasted ' + sessionLengthInSeconds + ' seconds');
+        emitCloudWatchMetric('SessionUtterances', 'Count', self.attributes.utterances);
+        emitCloudWatchMetric('SessionLength', 'Seconds', sessionLengthInSeconds);
+    } else {
+        log('Session metrics: ' + self.attributes.utterances + ' utterances, started ' + sessionLengthInSeconds + ' seconds ago');
+    }
+}
+
 function publishSNSMessage(message, subject, topicName) {
     log('Publishing SNS message [' + message + '], subject [' + subject + '] to [' + topicName + ']'); 
     // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/SNS.html#publish-property
@@ -129,12 +154,13 @@ function publishSNSMessage(message, subject, topicName) {
 
 function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue) {
     // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/CloudWatch.html#putMetricData-property
-    log("Emitting CloudWatch " + CloudWatchNamespace + " metric [" + name + "] = [" + value + "] (" + unit + ", " + dimensionName + " = " + dimensionValue + ")");
+    log("Emitting CloudWatch " + CloudWatchNamespace + " metric [" + name + "] = [" + value + "] (" + unit + 
+        (dimensionName ? ", " + dimensionName + " = " + dimensionValue : '') + ")");
     const params = { 
         Namespace: CloudWatchNamespace, 
         MetricData: [{ 
            MetricName: name, 
-           Dimensions: [{ Name: dimensionName, Value: dimensionValue }],
+           Dimensions: dimensionName ? [{ Name: dimensionName, Value: dimensionValue }] : [],
            Unit: unit, 
            Value: parseFloat(value)
         }]
@@ -289,9 +315,49 @@ function getDrivingDays(duration) {
     return 0;
 }
 
+function buildHowFarRouteResponse(origin, destination, leg) {
+
+    const actualOrigin = isPostalCode(origin) || (origin === defaultOrigin) ? 
+          origin : (leg.start_address || '').replace(/,.+/, '');
+    const actualDestination = isPostalCode(destination) || (destination === defaultDestination) ? 
+          destination : (leg.end_address || '').replace(/,.+/, '');
+    
+    const duration = (leg.duration.text || 'NoDuration').replace(/ 0 mins/, '').replace(/ 0 hours/, '');
+    const distance = (leg.distance.text || 'NoDistance').replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
+    const ferries = (leg.steps || []).filter((step) => ('ferry' === step.maneuver)).length;  
+    
+    const shortDistance = duration.match(/^\d+ mins?$/);
+    const drivingDays = getDrivingDays(duration);
+    
+    log("[" + origin + (actualOrigin !== origin ? ' (' + actualOrigin + ')' : '' ) + 
+        "] => [" + 
+        destination + (actualDestination !== destination ? ' (' + actualDestination + ')' : '') + ']: ' + 
+        "[" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]/[" + ferries + " ferries]");
+    
+    return sayAsAddress(actualDestination || destination) + ' is ' + 
+           (shortDistance ? random(['just', 'only', 'only']) + ' ' : '' ) + 
+           duration + 
+           (ferries > 0 ? ' and ' + ferries + ' ' + (ferries == 1 ? 'ferry' : 'ferries') : '') + 
+           ' away (or ' + distance + ') ' + 
+           'from ' + sayAsAddress(actualOrigin || origin) + '.' + 
+           (drivingDays > 1 ? ' <break time="0.03s"/>That\'ll be about ' + drivingDays + ' days driving.' : 
+                              '');
+}
+
+function buildHowFarNoRouteResponse(origin, destination) {
+    log("[" + origin + "] => [" + destination + "]: no route found");
+    return random(['Hmm', 'Oh dear', 'Oh']) + ', ' +
+           random(["I'm afraid", "it looks like"]) + ' ' + 
+           random(["you can't drive", "there is no route", "there is no way", "there is no way to drive"]) +
+           ' to ' + sayAsAddress(destination) + ' from ' + sayAsAddress(origin) + '.' + 
+           (origin.includes(' to ') || destination.includes(' to ') ? 
+                ' I can understand questions like <break time="0.1s"/> Las Vegas <break time="0.05s"/> or <break time="0.1s"/> Las Vegas from LAX.' : 
+                '');
+}
+
 // https://developers.google.com/maps/documentation/directions/intro
 // https://maps.googleapis.com/maps/api/directions/json?origin=98006&destination=98008&mode=driving&alternatives=false&key=???
-function howFar(destination, origin, callback){
+function howFar(origin, destination, callback){
     log("[" + origin + "] => [" + destination + "]");
     
     httpsGet(MAPS_ENDPOINT, MAPS_ENDPOINT_TIMEOUT, MAPS_ENDPOINT_RETRIES, '/maps/api/directions/json', { 
@@ -302,33 +368,12 @@ function howFar(destination, origin, callback){
         key: process.env.MAPS_API_KEY
     }, {}, (result) => {
         if (result) {
-            let response = ''
-            if (hasData(result.routes) && hasData(result.routes[0].legs)){
-                const leg = result.routes[0].legs[0];
-                const duration = (leg.duration.text || 'NoDuration').
-                                 replace(/ 0 mins/, '').replace(/ 0 hours/, '');
-                const distance = (leg.distance.text || 'NoDistance').
-                                 replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
-                const drivingDays = getDrivingDays(duration);
-                const ferries = (leg.steps || []).filter(step => 'ferry' === step.maneuver).length;  
-                
-                log("[" + origin + "] => [" + destination + "]: [" + duration + "]/[" + distance + "]/[" + drivingDays + " driving days]/[" + ferries + " ferries]");
-                response = '<say-as interpret-as="address">' + destination + '</say-as> is ' + duration + 
-                           (ferries < 1 ? '' : ' and ' + ferries + ' ' + (ferries == 1 ? 'ferry' : 'ferries')) + 
-                           ' away (or ' + distance + ') from <say-as interpret-as="address">' + origin + '</say-as>.' + 
-                           (drivingDays > 1 ? ' <break time="0.03s"/>That\'ll be about ' + drivingDays + ' days driving.' : 
-                                              '');
-            } else {
-                log("[" + origin + "] => [" + destination + "]: no route found");
-                response = noRouteResponse() +
-                           ' to <say-as interpret-as="address">' + destination + '</say-as> from <say-as interpret-as="address">' + origin + '</say-as>.';
-                if (origin.includes(' to ') || destination.includes(' to ')) {
-                    response += ' I can understand questions like <break time="0.1s"/> Las Vegas <break time="0.05s"/> or <break time="0.1s"/> Las Vegas from LAX.';    
-                }
-            }
-            
+            const response = (hasData(result.routes) && hasData(result.routes[0].legs)) ? 
+                             buildHowFarRouteResponse(origin, destination, result.routes[0].legs[0]) : 
+                             buildHowFarNoRouteResponse(origin, destination);
             callback(response + '\n\n' + waitingForInputDelayed);
         } else {
+            // Google Maps API has failed after all retries
             callback('Oh dear, something went wrong.'); 
         }
     });
@@ -337,35 +382,41 @@ function howFar(destination, origin, callback){
 const handlers = {
     'LaunchRequest': function () {
         logEvent(this);
+        updateSessionMetrics(this, false, false);
         setDefaultOrigin(this, () => tellWelcomeMessage(this));
     },
     'AMAZON.HelpIntent': function () {
         logEvent(this);
+        updateSessionMetrics(this, false, false);
         setDefaultOrigin(this, () => tellWelcomeMessage(this));
     },
     'HowFarIntent': function () {
         logEvent(this);
+        updateSessionMetrics(this, true, false);
         const slots = this.event.request.intent.slots;
         log(slots);
         setDefaultOrigin(this, () => {
-            const destination = slotValue(slots.Destination, defaultDestination).
-                                replace(/^\s*is\s*/, ''); // Destination may read as "is <Destination>"
             const origin = slotValue(slots.Origin, getDefaultOrigin(this));
-            howFar(destination, origin, (response) => {  
+            const destination = slotValue(slots.Destination, defaultDestination).
+                                replace(/^\s*is\s*/, ''); // Destination may read as "is Destination" in "How Far is Destination"
+            howFar(origin, destination, (response) => {  
                 askWithCard(this, response, waitingForInput, 'How Far is ' + destination + ' from ' + origin + '?');
             });
         });
     },
     'AMAZON.CancelIntent': function () {
         logEvent(this);
+        updateSessionMetrics(this, false, true);
         tellWithCard(this, complyResponse(), 'Session Ended', 'Bye-bye for now!');
     },
     'AMAZON.StopIntent': function () {
         logEvent(this);
+        updateSessionMetrics(this, false, true);
         tellWithCard(this, complyResponse(), 'Session Ended', 'Bye-bye for now!');
     },
     'SessionEndedRequest': function () {
         logEvent(this);
+        updateSessionMetrics(this, false, true);
         tellWithCard(this, complyResponse(), 'Session Ended', 'Bye-bye for now!');
     }
 };
