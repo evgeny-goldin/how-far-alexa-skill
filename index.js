@@ -315,13 +315,16 @@ function getDrivingDays(duration) {
     return 0;
 }
 
+function cleanupAddress(actualAddress, originalAddress, defaultAddress) {
+    return (isPostalCode(originalAddress) || (originalAddress === defaultAddress) || (! actualAddress)) ? 
+           originalAddress : actualAddress.split(/\s*,\s*/).slice(0, 2).join(', ');
+}
+
 function buildHowFarRouteResponse(origin, destination, leg) {
 
-    const actualOrigin = isPostalCode(origin) || (origin === defaultOrigin) ? 
-          origin : (leg.start_address || '').replace(/,.+/, '');
-    const actualDestination = isPostalCode(destination) || (destination === defaultDestination) ? 
-          destination : (leg.end_address || '').replace(/,.+/, '');
-    
+    const actualOrigin = cleanupAddress(leg.start_address, origin, defaultOrigin);
+    const actualDestination = cleanupAddress(leg.end_address, destination, defaultDestination);
+
     const duration = (leg.duration.text || 'NoDuration').replace(/ 0 mins/, '').replace(/ 0 hours/, '');
     const distance = (leg.distance.text || 'NoDistance').replace(/(\d+)\.\d+/g, '$1'); // a.b miles => a miles
     const ferries = (leg.steps || []).filter((step) => ('ferry' === step.maneuver)).length;  
@@ -350,7 +353,7 @@ function buildHowFarNoRouteResponse(origin, destination) {
            random(["I'm afraid", "it looks like"]) + ' ' + 
            random(["you can't drive", "there is no route", "there is no way", "there is no way to drive"]) +
            ' to ' + sayAsAddress(destination) + ' from ' + sayAsAddress(origin) + '.' + 
-           (origin.includes(' to ') || destination.includes(' to ') ? 
+           (origin.startsWith('to ') || origin.includes(' to ') || destination.startsWith('to ') || destination.includes(' to ') ? 
                 ' I can understand questions like <break time="0.1s"/> Las Vegas <break time="0.05s"/> or <break time="0.1s"/> Las Vegas from LAX.' : 
                 '');
 }
@@ -433,4 +436,3 @@ exports.handler = (event, context) => {
     alexa.registerHandlers(handlers);
     alexa.execute();
 };
-
