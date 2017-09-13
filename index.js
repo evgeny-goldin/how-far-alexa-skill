@@ -1,4 +1,6 @@
-// * Allow updating user's default origin
+// Allow updating user's default origin
+// Swap origin and destination for "To" question
+// Pronounce both destination and updated destination ?
 
 'use strict';
 
@@ -28,11 +30,7 @@ const defaultDestination = 'Seattle, WA';
 const defaultOrigin = 'Seattle, WA';
 const CloudWatchNamespace = 'HowFarLambda';
 
-const samplePhrases = [
-    'Yellowstone Park',
-    'Vienna from Munich',
-    'Las Vegas from LAX'
-];
+const samplePhrases = ['Yellowstone Park', 'Vienna from Munich', 'Las Vegas from LAX'];
 
 const welcomeMessage = 'Welcome to "How Far" Alexa skill <break time="0.05s"/> telling how far your destination is in driving hours. ' + 
                        'You can say <break time="0.25s"/> ' + samplePhrases[0] + ', ' +  
@@ -47,41 +45,96 @@ const log = console.log;
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+/**
+ * Logs incoming event, user and device Id
+ */ 
 function logEvent(self) {
     if (self.event) { log(self.event); }
     log("User: " + getUserId(self));
     log("Device: " + getDeviceId(self));
 }
 
+/**
+ * Determines if the String provided is US postal code
+ */ 
 function isPostalCode(s) {
     // US postal codes only so far, other countries may use letter as well
     return (s.match(/^\d+$/) !== null);
 }
 
+/**
+ * Returns a random number form 0 (inclusive) to N (exclusive)
+ */ 
 function randomNumber(topNumber) {
     return Math.floor(Math.random() * topNumber);
 }
 
+/**
+ * Returns array's random element
+ */ 
 function random(array) {
     return(array[ randomNumber(array.length) ]);
 }
 
+/**
+ * Returns random compliance report 
+ */ 
 function complyResponse() {
     return random(['Sure!', 'OK!', 'Done!', 'Got it', 'Done deal']);
 }
 
+/**
+ * Returns slot's value or a default value if slot is not available or its value is undefined
+ */ 
 function slotValue(slot, defaultValue) {
     return (slot ? (slot.value || defaultValue) : defaultValue);
 }
 
+/**
+ * Clears all SSML tags from the response 
+ */ 
 function clearTags(s) {
     return (s || '').replace(/<[^>]+>/g, '');
 }
 
+/**
+ * Wraps a String provided in <say-as interpret-as="address">
+ */ 
 function sayAsAddress(s) {
     return '<say-as interpret-as="address">' + s + '</say-as>';
 }
 
+/**
+ * Retrieves a user Id from the current request or empty String if unavailable
+ */ 
+function getUserId(self) {
+    return self.event.context ? self.event.context.System.user.userId : '';
+}
+
+/**
+ * Retrieves a device Id from the current request or empty String if unavailable
+ */ 
+function getDeviceId(self) {
+    return self.event.context ? self.event.context.System.device.deviceId : '';
+}
+
+/**
+ * Retrieves a default origin, either device postal code (if enabled) or a predefined one
+ */ 
+function getDefaultOrigin(self) {
+    return (self.attributes.defaultOrigin || defaultOrigin);
+}
+
+/**
+ * Determines if array provided has any data (not empty)
+ */ 
+function hasData(array){
+    return (array && (array.length > 0));
+}
+
+/**
+ * :tellWithCard wrapper
+ */ 
 function tellWithCard(self, speechOutput, cardTitle, cardContent) {
     cardTitle = clearTags(cardTitle);
     cardContent = clearTags(cardContent || speechOutput);
@@ -89,6 +142,9 @@ function tellWithCard(self, speechOutput, cardTitle, cardContent) {
     self.emit(':tellWithCard', speechOutput, cardTitle, cardContent); 
 }
 
+/**
+ * :askWithCard wrapper
+ */ 
 function askWithCard(self, speechOutput, repromptSpeech, cardTitle, cardContent) {
     cardTitle = clearTags(cardTitle);
     cardContent = clearTags(cardContent || speechOutput);
@@ -96,6 +152,9 @@ function askWithCard(self, speechOutput, repromptSpeech, cardTitle, cardContent)
     self.emit(':askWithCard', speechOutput, repromptSpeech, cardTitle, cardContent); 
 }
 
+/**
+ * Greets the user and provides the intro message
+ */ 
 function tellWelcomeMessage(self) {
     const speechOutput = welcomeMessage + 
                          " <break time='0.3s'/> Your location is set to " + sayAsAddress(getDefaultOrigin(self)) + ". " + 
@@ -103,12 +162,18 @@ function tellWelcomeMessage(self) {
     askWithCard(self, speechOutput, waitingForInput, waitingForInput, welcomeCardContent);
 }
 
+/**
+ * Logs the error specified
+ */ 
 function logError(error, errorDescription) {
     console.error('++++++++++ [' + errorDescription + '] ++++++++++');
     console.error(error || errorDescription); 
     console.error('++++++++++ [' + errorDescription + '] ++++++++++');
 }
 
+/**
+ * Handles an error thrown - logs it, publishes to SNS and emits a CloudWatch metric
+ */ 
 function handleError(error, errorDescription, errorType) {
     logError(error, errorDescription);
     publishSNSMessage(error.stack || errorDescription, 'HowFar - error logged', ERRORS_SNS_TOPIC);
@@ -117,6 +182,10 @@ function handleError(error, errorDescription, errorType) {
     }
 }
 
+/**
+ * Updates session metrics - length in seconds and number of utternaces. 
+ * If session has ended - emits corresponding CloudWatch metrics.
+ */ 
 function updateSessionMetrics(self, isUtterance, sessionEnded) {
     if (self.attributes.sessionStarted) {
         // Session has already started
@@ -140,6 +209,9 @@ function updateSessionMetrics(self, isUtterance, sessionEnded) {
     }
 }
 
+/**
+ * Publishes a message provided to SNS topic specified.
+ */ 
 function publishSNSMessage(message, subject, topicName) {
     log('Publishing SNS message [' + message + '], subject [' + subject + '] to [' + topicName + ']'); 
     // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/SNS.html#publish-property
@@ -152,6 +224,9 @@ function publishSNSMessage(message, subject, topicName) {
     });
 }
 
+/**
+ * Emits CloudWatch metric provided.
+ */ 
 function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue) {
     // http://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/CloudWatch.html#putMetricData-property
     log("Emitting CloudWatch " + CloudWatchNamespace + " metric [" + name + "] = [" + value + "] (" + unit + 
@@ -174,7 +249,9 @@ function emitCloudWatchMetric(name, unit, value, dimensionName, dimensionValue) 
     });
 }
 
-// HTTPS GET wrapper
+/**
+ * HTTPS Get wrapper, invokes a callback with parsed JSON response or no data if failed.
+ */ 
 function httpsGet(hostname, timeoutInMillis, retries, path, args, headers, callback) {
 
     // https://nodejs.org/api/https.html#https_https_request_options_callback
@@ -243,15 +320,9 @@ function httpsGet(hostname, timeoutInMillis, retries, path, args, headers, callb
     }
 }
 
-function getUserId(self) {
-    return self.event.context ? self.event.context.System.user.userId : '';
-}
-
-function getDeviceId(self) {
-    return self.event.context ? self.event.context.System.device.deviceId : '';
-}
-
-// https://developer.amazon.com/public/solutions/alexa/alexa-skills-kit/docs/device-address-api#get-the-consent-token-and-device-id
+/**
+ * Attempts to set a default origin if user has enabled device postal code sharing
+ */ 
 function setDefaultOrigin(self, callback){
     const context = self.event.context;
     const currentDefaultOrigin = getDefaultOrigin(self);
@@ -261,6 +332,8 @@ function setDefaultOrigin(self, callback){
         
         if (context && context.System && context.System.user && 
             context.System.user.permissions && context.System.user.permissions.consentToken) {
+
+            // https://developer.amazon.com/public/solutions/alexa/alexa-skills-kit/docs/device-address-api#get-the-consent-token-and-device-id
             
             log("ConsentToken is available in request");
             const consentToken = context.System.user.permissions.consentToken;
@@ -288,14 +361,9 @@ function setDefaultOrigin(self, callback){
     }
 }
 
-function getDefaultOrigin(self) {
-    return (self.attributes.defaultOrigin || defaultOrigin);
-}
-
-function hasData(array){
-    return (array && (array.length > 0));
-}
-
+/**
+ * Calculates a number of "driving days" for provided destination
+ */ 
 function getDrivingDays(duration) {
     const isDays = duration.includes('day');
     const isHours = duration.includes('hour');
@@ -315,11 +383,17 @@ function getDrivingDays(duration) {
     return 0;
 }
 
+/**
+ * Cleans up Google Map address up to the second "," - if available and is not a postal code 
+ */ 
 function cleanupAddress(actualAddress, originalAddress, defaultAddress) {
     return (isPostalCode(originalAddress) || (originalAddress === defaultAddress) || (! actualAddress)) ? 
            originalAddress : actualAddress.split(/\s*,\s*/).slice(0, 2).join(', ');
 }
 
+/**
+ * Returns a response for a origin => destination route found
+ */ 
 function buildHowFarRouteResponse(origin, destination, leg) {
 
     const actualOrigin = cleanupAddress(leg.start_address, origin, defaultOrigin);
@@ -347,6 +421,9 @@ function buildHowFarRouteResponse(origin, destination, leg) {
                               '');
 }
 
+/**
+ * Returns a response for no origin => destination route found
+ */ 
 function buildHowFarNoRouteResponse(origin, destination) {
     log("[" + origin + "] => [" + destination + "]: no route found");
     return random(['Hmm', 'Oh dear', 'Oh']) + ', ' +
@@ -358,10 +435,14 @@ function buildHowFarNoRouteResponse(origin, destination) {
                 '');
 }
 
-// https://developers.google.com/maps/documentation/directions/intro
-// https://maps.googleapis.com/maps/api/directions/json?origin=98006&destination=98008&mode=driving&alternatives=false&key=???
+/**
+ * Calculates how far is origin from destination and invokes a callback with corresponding response
+ */ 
 function howFar(origin, destination, callback){
     log("[" + origin + "] => [" + destination + "]");
+   
+    // https://developers.google.com/maps/documentation/directions/intro
+    // https://maps.googleapis.com/maps/api/directions/json?origin=98006&destination=98008&mode=driving&alternatives=false&key=???
     
     httpsGet(MAPS_ENDPOINT, MAPS_ENDPOINT_TIMEOUT, MAPS_ENDPOINT_RETRIES, '/maps/api/directions/json', { 
         origin: origin,
@@ -401,7 +482,7 @@ const handlers = {
         setDefaultOrigin(this, () => {
             const origin = slotValue(slots.Origin, getDefaultOrigin(this));
             const destination = slotValue(slots.Destination, defaultDestination).
-                                replace(/^\s*is\s*/, ''); // Destination may read as "is Destination" in "How Far is Destination"
+                                replace(/^\s*is\s*/, ''); // Destination may read as "is <destination>" in "How Far is <destination>"
             howFar(origin, destination, (response) => {  
                 askWithCard(this, response, waitingForInput, 'How Far is ' + destination + ' from ' + origin + '?');
             });
@@ -424,6 +505,7 @@ const handlers = {
     }
 };
 
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 exports.handler = (event, context) => {
     const isTestRequest = ! (event.context && 
